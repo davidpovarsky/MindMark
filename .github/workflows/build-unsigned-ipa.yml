@@ -22,8 +22,451 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: mindmark-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_PATH: MindMark.xcodeproj
+  TARGET_NAME: MindMark
+  SCHEME_NAME: MindMark
+  CONFIGURATION: Release
+  BUILD_ROOT: ${{ github.workspace }}/build
+  LOG_DIR: ${{ github.workspace }}/build/logs
+  OUTPUT_DIR: ${{ github.workspace }}/build/output
+  DERIVED_DATA_PATH: ${{ github.workspace }}/build/DerivedData
+  TARGET_BUILD_ROOT: ${{ github.workspace }}/build/TargetBuild
+  RESULT_BUNDLE_PATH: ${{ github.workspace }}/build/MindMark.xcresult
+
 jobs:
   build-ios:
     name: Build unsigned iOS IPA
     runs-on: macos-26
-    timeout-minutes: 
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Prepare build directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            "$LOG_DIR" \
+            "$OUTPUT_DIR" \
+            "$DERIVED_DATA_PATH" \
+            "$TARGET_BUILD_ROOT"
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          XCODE_APP=""
+
+          for candidate in \
+            "/Applications/Xcode_26.4.1.app" \
+            "/Applications/Xcode_26.4.app"
+          do
+            if [[ -d "$candidate" ]]; then
+              XCODE_APP="$candidate"
+              break
+            fi
+          done
+
+          if [[ -z "$XCODE_APP" ]]; then
+            XCODE_APP="$(
+              find /Applications \
+                -maxdepth 1 \
+                -type d \
+                -name "Xcode_26*.app" \
+                ! -name "*beta*" \
+                ! -name "*Beta*" \
+                ! -name "*RC*" \
+                -print 2>/dev/null |
+              sort |
+              tail -n 1
+            )"
+          fi
+
+          if [[ -z "$XCODE_APP" || ! -d "$XCODE_APP" ]]; then
+            echo "::error::No stable Xcode 26 installation was found."
+            find /Applications -maxdepth 1 -name "Xcode*.app" -print || true
+            exit 1
+          fi
+
+          sudo xcode-select --switch "$XCODE_APP/Contents/Developer"
+
+          echo "SELECTED_XCODE=$XCODE_APP" >> "$GITHUB_ENV"
+          echo "Selected Xcode: $XCODE_APP"
+
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Record environment diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Commit: $GITHUB_SHA"
+            echo "Ref: $GITHUB_REF"
+            echo "Runner OS: $RUNNER_OS"
+            echo "Runner architecture: $RUNNER_ARCH"
+            echo "Selected Xcode: ${SELECTED_XCODE:-unknown}"
+            echo
+            echo "=== macOS ==="
+            sw_vers
+            echo
+            echo "=== Kernel ==="
+            uname -a
+            echo
+            echo "=== Xcode ==="
+            xcodebuild -version
+            echo
+            echo "=== Installed SDKs ==="
+            xcodebuild -showsdks
+            echo
+            echo "=== Active iPhoneOS SDK ==="
+            xcrun --sdk iphoneos --show-sdk-path
+            xcrun --sdk iphoneos --show-sdk-version
+            echo
+            echo "=== Installed Xcode applications ==="
+            find /Applications -maxdepth 1 -name "Xcode*.app" -print | sort
+            echo
+            echo "=== Git ==="
+            git --version
+            git rev-parse HEAD
+            git status --short
+          } 2>&1 | tee "$LOG_DIR/environment.txt"
+
+      - name: Discover project build mode
+        id: discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_LIST_JSON="$LOG_DIR/project-list.json"
+          PROJECT_LIST_STDERR="$LOG_DIR/project-list.stderr.log"
+
+          set +e
+          xcodebuild \
+            -project "$PROJECT_PATH" \
+            -list \
+            -json \
+            > "$PROJECT_LIST_JSON" \
+            2> "$PROJECT_LIST_STDERR"
+          LIST_STATUS=$?
+          set -e
+
+          if [[ "$LIST_STATUS" -ne 0 ]]; then
+            echo "::error::xcodebuild could not inspect $PROJECT_PATH."
+            cat "$PROJECT_LIST_STDERR" || true
+            exit "$LIST_STATUS"
+          fi
+
+          TARGET_PRESENT="$(
+            python3 -c 'import json, sys; data = json.load(open(sys.argv[1], encoding="utf-8")); print("yes" if sys.argv[2] in data.get("project", {}).get("targets", []) else "no")'               "$PROJECT_LIST_JSON"               "$TARGET_NAME"
+          )"
+
+          if [[ "$TARGET_PRESENT" != "yes" ]]; then
+            echo "::error::Target '$TARGET_NAME' was not found in $PROJECT_PATH."
+            cat "$PROJECT_LIST_JSON"
+            exit 1
+          fi
+
+          SCHEME_PRESENT="$(
+            python3 -c 'import json, sys; data = json.load(open(sys.argv[1], encoding="utf-8")); print("yes" if sys.argv[2] in data.get("project", {}).get("schemes", []) else "no")'               "$PROJECT_LIST_JSON"               "$SCHEME_NAME"
+          )"
+
+          if [[ "$SCHEME_PRESENT" == "yes" ]]; then
+            BUILD_MODE="scheme"
+          else
+            BUILD_MODE="target"
+          fi
+
+          echo "BUILD_MODE=$BUILD_MODE" >> "$GITHUB_ENV"
+          echo "mode=$BUILD_MODE" >> "$GITHUB_OUTPUT"
+
+          echo "Build mode: $BUILD_MODE"
+          cat "$PROJECT_LIST_JSON"
+
+      - name: Record resolved build settings
+        shell: bash
+        run: |
+          set +e
+
+          if [[ "$BUILD_MODE" == "scheme" ]]; then
+            xcodebuild \
+              -project "$PROJECT_PATH" \
+              -scheme "$SCHEME_NAME" \
+              -configuration "$CONFIGURATION" \
+              -sdk iphoneos \
+              -destination "generic/platform=iOS" \
+              -showBuildSettings \
+              > "$LOG_DIR/build-settings.txt" \
+              2> "$LOG_DIR/build-settings.stderr.log"
+          else
+            xcodebuild \
+              -project "$PROJECT_PATH" \
+              -target "$TARGET_NAME" \
+              -configuration "$CONFIGURATION" \
+              -sdk iphoneos \
+              -showBuildSettings \
+              > "$LOG_DIR/build-settings.txt" \
+              2> "$LOG_DIR/build-settings.stderr.log"
+          fi
+
+          exit 0
+
+      - name: Build unsigned iOS application
+        id: build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+
+          rm -rf "$RESULT_BUNDLE_PATH"
+
+          COMMON_BUILD_SETTINGS=(
+            "CODE_SIGNING_ALLOWED=NO"
+            "CODE_SIGNING_REQUIRED=NO"
+            "CODE_SIGN_IDENTITY="
+            "DEVELOPMENT_TEAM="
+            "PROVISIONING_PROFILE_SPECIFIER="
+            "COMPILER_INDEX_STORE_ENABLE=NO"
+            "ONLY_ACTIVE_ARCH=NO"
+            "SUPPORTED_PLATFORMS=iphoneos"
+          )
+
+          if [[ "$BUILD_MODE" == "scheme" ]]; then
+            xcodebuild \
+              -project "$PROJECT_PATH" \
+              -scheme "$SCHEME_NAME" \
+              -configuration "$CONFIGURATION" \
+              -sdk iphoneos \
+              -destination "generic/platform=iOS" \
+              -derivedDataPath "$DERIVED_DATA_PATH" \
+              -resultBundlePath "$RESULT_BUNDLE_PATH" \
+              "${COMMON_BUILD_SETTINGS[@]}" \
+              clean build \
+              2>&1 | tee "$LOG_DIR/xcodebuild.log"
+          else
+            xcodebuild \
+              -project "$PROJECT_PATH" \
+              -target "$TARGET_NAME" \
+              -configuration "$CONFIGURATION" \
+              -sdk iphoneos \
+              -resultBundlePath "$RESULT_BUNDLE_PATH" \
+              "SYMROOT=$TARGET_BUILD_ROOT/Products" \
+              "OBJROOT=$TARGET_BUILD_ROOT/Intermediates" \
+              "SHARED_PRECOMPS_DIR=$TARGET_BUILD_ROOT/PrecompiledHeaders" \
+              "${COMMON_BUILD_SETTINGS[@]}" \
+              clean build \
+              2>&1 | tee "$LOG_DIR/xcodebuild.log"
+          fi
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+
+          echo "status=$BUILD_STATUS" >> "$GITHUB_OUTPUT"
+          echo "xcodebuild exit code: $BUILD_STATUS" | tee "$LOG_DIR/build-exit-code.txt"
+
+          exit "$BUILD_STATUS"
+
+      - name: Package unsigned IPA
+        id: package
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH=""
+
+          SEARCH_ROOTS=(
+            "$DERIVED_DATA_PATH/Build/Products"
+            "$TARGET_BUILD_ROOT/Products"
+          )
+
+          for root in "${SEARCH_ROOTS[@]}"; do
+            if [[ -d "$root" ]]; then
+              candidate="$(
+                find "$root" \
+                  -type d \
+                  -name "$TARGET_NAME.app" \
+                  -print \
+                  -quit
+              )"
+
+              if [[ -n "$candidate" ]]; then
+                APP_PATH="$candidate"
+                break
+              fi
+            fi
+          done
+
+          if [[ -z "$APP_PATH" || ! -d "$APP_PATH" ]]; then
+            echo "::error::The compiled $TARGET_NAME.app bundle could not be found."
+            find "$BUILD_ROOT" -maxdepth 8 -print > "$LOG_DIR/build-tree-after-missing-app.txt" || true
+            exit 1
+          fi
+
+          echo "Compiled app: $APP_PATH" | tee "$LOG_DIR/app-path.txt"
+
+          rm -rf "$OUTPUT_DIR/Payload"
+          mkdir -p "$OUTPUT_DIR/Payload"
+
+          ditto \
+            "$APP_PATH" \
+            "$OUTPUT_DIR/Payload/$TARGET_NAME.app"
+
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          IPA_NAME="${TARGET_NAME}-unsigned-run-${GITHUB_RUN_NUMBER}-${SHORT_SHA}.ipa"
+          IPA_PATH="$OUTPUT_DIR/$IPA_NAME"
+
+          (
+            cd "$OUTPUT_DIR"
+            /usr/bin/zip -qry "$IPA_NAME" Payload
+          )
+
+          ditto \
+            -c \
+            -k \
+            --sequesterRsrc \
+            --keepParent \
+            "$OUTPUT_DIR/Payload/$TARGET_NAME.app" \
+            "$OUTPUT_DIR/$TARGET_NAME.app.zip"
+
+          shasum -a 256 "$IPA_PATH" > "$OUTPUT_DIR/SHA256SUMS.txt"
+
+          {
+            echo "=== IPA integrity test ==="
+            /usr/bin/unzip -t "$IPA_PATH"
+            echo
+            echo "=== IPA contents ==="
+            /usr/bin/unzip -l "$IPA_PATH"
+          } 2>&1 | tee "$LOG_DIR/ipa-validation.txt"
+
+          {
+            echo "=== App bundle ==="
+            ls -la "$OUTPUT_DIR/Payload/$TARGET_NAME.app"
+            echo
+            echo "=== App Info.plist ==="
+            plutil -p "$OUTPUT_DIR/Payload/$TARGET_NAME.app/Info.plist"
+            echo
+            echo "=== Code-signing state ==="
+            codesign -dvvv "$OUTPUT_DIR/Payload/$TARGET_NAME.app" || true
+          } > "$LOG_DIR/app-bundle-diagnostics.txt" 2>&1
+
+          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "Created unsigned IPA: $IPA_PATH"
+
+      - name: Collect final diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$LOG_DIR"
+
+          {
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Commit: $GITHUB_SHA"
+            echo "Run ID: $GITHUB_RUN_ID"
+            echo "Run number: $GITHUB_RUN_NUMBER"
+            echo "Build mode: ${BUILD_MODE:-not determined}"
+            echo "Selected Xcode: ${SELECTED_XCODE:-not selected}"
+            echo "Build step outcome: ${{ steps.build.outcome }}"
+            echo "Build exit code: ${{ steps.build.outputs.status }}"
+            echo "Package step outcome: ${{ steps.package.outcome }}"
+            echo
+            echo "Generated output files:"
+            find "$OUTPUT_DIR" -maxdepth 3 -type f -print 2>/dev/null | sort
+          } > "$LOG_DIR/summary.txt"
+
+          find "$BUILD_ROOT" \
+            -maxdepth 10 \
+            -print \
+            > "$LOG_DIR/build-tree.txt" \
+            2>&1 || true
+
+          du -ak "$BUILD_ROOT" 2>/dev/null |
+            sort -n |
+            tail -n 250 \
+            > "$LOG_DIR/largest-build-items-kb.txt" || true
+
+          if [[ -d "$RESULT_BUNDLE_PATH" ]]; then
+            xcrun xcresulttool get object \
+              --legacy \
+              --path "$RESULT_BUNDLE_PATH" \
+              --format json \
+              > "$LOG_DIR/xcresult.json" \
+              2> "$LOG_DIR/xcresult-export.stderr.log" || true
+          fi
+
+          {
+            echo "## MindMark unsigned iOS build"
+            echo
+            echo "- Xcode: \`${SELECTED_XCODE:-not selected}\`"
+            echo "- Build mode: \`${BUILD_MODE:-not determined}\`"
+            echo "- Build outcome: \`${{ steps.build.outcome }}\`"
+            echo "- Package outcome: \`${{ steps.package.outcome }}\`"
+            echo
+            echo "The diagnostic artifact is uploaded even when the build fails."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit 0
+
+      - name: Upload unsigned IPA artifact
+        if: always() && steps.package.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MindMark-unsigned-ipa-${{ github.run_number }}
+          path: |
+            build/output/*.ipa
+            build/output/*.zip
+            build/output/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MindMark-build-diagnostics-${{ github.run_number }}
+          path: |
+            build/logs
+            build/MindMark.xcresult
+            build/DerivedData/Logs
+            build/TargetBuild/Intermediates/**/*.xcbuilddata
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
+
+      - name: Mark workflow as failed when build or packaging failed
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_OUTCOME="${{ steps.build.outcome }}"
+          PACKAGE_OUTCOME="${{ steps.package.outcome }}"
+
+          if [[ "$BUILD_OUTCOME" != "success" ]]; then
+            echo "::error::The Xcode build failed. Download the MindMark-build-diagnostics artifact."
+            exit 1
+          fi
+
+          if [[ "$PACKAGE_OUTCOME" != "success" ]]; then
+            echo "::error::The app compiled, but IPA packaging failed. Download the diagnostic artifact."
+            exit 1
+          fi
+
+          echo "Build and unsigned IPA packaging completed successfully."
