@@ -20,6 +20,7 @@ on:
       - ".github/workflows/build-unsigned-ipa.yml"
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -45,11 +46,27 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Prepare build directories
         shell: bash
         run: |
@@ -60,6 +77,14 @@ jobs:
             "$DERIVED_DATA_PATH" \
             "$TARGET_BUILD_ROOT"
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Select Xcode
         shell: bash
         run: |
@@ -106,6 +131,14 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Record environment diagnostics
         shell: bash
         run: |
@@ -144,6 +177,14 @@ jobs:
             git status --short
           } 2>&1 | tee "$LOG_DIR/environment.txt"
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Discover project build mode
         id: discovery
         shell: bash
@@ -195,6 +236,14 @@ jobs:
           echo "Build mode: $BUILD_MODE"
           cat "$PROJECT_LIST_JSON"
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Record resolved build settings
         shell: bash
         run: |
@@ -223,6 +272,14 @@ jobs:
 
           exit 0
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Build unsigned iOS application
         id: build
         continue-on-error: true
@@ -278,6 +335,15 @@ jobs:
 
           exit "$BUILD_STATUS"
 
+      - name: Live Activity · refresh
+        if: steps.build.outcome == 'success'
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Package unsigned IPA
         id: package
         if: steps.build.outcome == 'success'
@@ -368,6 +434,15 @@ jobs:
 
           echo "Created unsigned IPA: $IPA_PATH"
 
+      - name: Live Activity · refresh
+        if: always()
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Collect final diagnostics
         if: always()
         shell: bash
@@ -423,6 +498,15 @@ jobs:
 
           exit 0
 
+      - name: Live Activity · refresh
+        if: always() && steps.package.outcome == 'success'
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Upload unsigned IPA artifact
         if: always() && steps.package.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -436,6 +520,15 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+      - name: Live Activity · refresh
+        if: always()
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -450,6 +543,15 @@ jobs:
           retention-days: 14
           compression-level: 6
 
+      - name: Live Activity · refresh
+        if: always()
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Mark workflow as failed when build or packaging failed
         if: always()
         shell: bash
